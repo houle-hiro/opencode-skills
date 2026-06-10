@@ -1,6 +1,6 @@
 ---
 name: cicd-deploy-monitor
-description: 在多仓微服务（BrowserGateway / GlobalInstanceDeliverService / MediaCacheService）项目中，端到端完成"需求实现 → 本地测试 → Git 提交推送 → 拉取并解压 CI/CD 日志包 → AI 解读日志判断编译/运行/测试是否通过 → 必要时修复代码并重提交"的循环。实现阶段通过派 `general` 子代理完成。使用场景：用户提出一个业务需求，且希望自动驱动公司内部 CI/CD 流水线并基于真实运行/评测日志决定是否需要再修复。Use ONLY when the user is in the sbg monorepo and wants a requirement to flow through the internal CI/CD pipeline with pipeline log verification.
+description: 在多仓微服务（BrowserGateway / GlobalInstanceDeliverService / MediaCacheService）项目中，端到端完成"需求实现 → 本地测试 → Git 提交推送 → 拉取并解压 CI/CD 日志包 → AI 解读日志判断编译/运行/测试是否通过 → 必要时修复代码并重提交"的循环。实现阶段通过派 `general` 子代理完成；路径与日志服务 URL 通过 `config.yaml` 配置（不写死绝对路径）。使用场景：用户提出一个业务需求，且希望自动驱动公司内部 CI/CD 流水线并基于真实运行/评测日志决定是否需要再修复。Use ONLY when the user is in the sbg monorepo and wants a requirement to flow through the internal CI/CD pipeline with pipeline log verification.
 ---
 
 # CI/CD 部署监控 Skill（sbg 多仓项目）
@@ -9,7 +9,7 @@ description: 在多仓微服务（BrowserGateway / GlobalInstanceDeliverService 
 
 ## 项目结构与仓库缩写
 
-工作目录：`/home/lele/project/work/csp-ysj/sbg`
+工作目录：在 `config.yaml` 里以 `<config.repos.*.path>` 形式配置实际路径（占位时也可直接写绝对路径）。文档示例统一用 `<WORK_DIR>` 指代。
 
 | 仓库目录 | 仓库名 | 缩写 | 远程 (ssh) |
 |---|---|---|---|
@@ -50,7 +50,7 @@ task(
 子代理 prompt 模板（**每个仓库一份**，互不干扰）：
 
 ```text
-你是一名在沙箱里工作的 Go/Java 工程师。仓库根：/home/lele/project/work/csp-ysj/sbg/<Repo>。
+你是一名在沙箱里工作的 Go/Java 工程师。仓库根：<WORK_DIR>/<Repo>（其中 `<WORK_DIR>` 由主代理从 `config.yaml` 的 `repos.<abbr>.path` 解析得到；如未配置，先问主代理）。
 需求：<从主代理传过来的那段需求描述，原文粘贴>
 验收口径：<主代理从用户那里确认的"什么算通过"的口径>
 
@@ -77,7 +77,7 @@ task(
 **每个受影响仓库**都走完整流程：
 
 ```bash
-cd /home/lele/project/work/csp-ysj/sbg/<Repo>
+cd <WORK_DIR>/<Repo>
 git status
 git add -A
 # 重要：必须新 commit，绝不合并到已有 commit
@@ -124,9 +124,11 @@ submitted = [
 
 ```bash
 # 推荐：前台跑，bash 工具 timeout 调到 35 分钟（2100000ms）以上
+# url / out_dir 也可写在 config.yaml，CLI 仍优先
 python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py \
   --watch bgw=<bgw_short> --watch mc=<mc_short> \
-  --out ./_cicd_logs/ --base-url http://81.70.210.89:8080
+  --out <config.paths.out_dir 或 ./_cicd_logs> \
+  --base-url <config.log_service.url 或 http://your-log-service:8080>
 ```
 
 或显式环境变量：
@@ -178,6 +180,65 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py
 - `scripts/log_poller.py`：日志轮询 + 下载 + 解压
 - 生成的产物在 `_cicd_logs/raw/<name>/` 与 `_cicd_logs/extracted/<name>/<commit_id>/`
 - 轮询状态在 `_cicd_logs/state.json`（重启后会跳过已下载文件）
+
+## 配置文件
+
+把**所有与具体环境绑定的路径与 URL** 抽到 `config.yaml`，**不**在 SKILL.md / 脚本里写死。同一份 skill 仓库可被不同项目/不同机器复用。
+
+**优先级（高 → 低）**：CLI 参数 > 环境变量 > `config.yaml` > 脚本内置默认。
+
+### 配置项
+
+| 字段 | 类型 | 说明 | 默认 |
+|---|---|---|---|
+| `log_service.url` | string | 后台日志服务基础 URL | `http://81.70.210.89:8080` |
+| `log_service.poll_interval_sec` | int | 轮询间隔（秒） | `10` |
+| `log_service.timeout_sec` | int | 总超时（秒），超时返回码 2 | `1800` |
+| `paths.out_dir` | string | 产物输出根目录 | `./_cicd_logs` |
+| `paths.watches` | list[string] | 默认 `name=commit` 列表，**省略时必须用 `--watch` 或 `LOG_WATCHES`** | `[]` |
+| `repos.bgw.path` | string | BrowserGateway 仓库本地绝对路径 | `""` |
+| `repos.gids.path` | string | GlobalInstanceDeliverService 仓库本地绝对路径 | `""` |
+| `repos.mc.path` | string | MediaCacheService 仓库本地绝对路径 | `""` |
+| `work_dir` | string | 文档锚点，等价于"几个仓库的共同父目录" | `""` |
+
+### 行为
+
+- 改 `config.yaml` 即可换环境，**不需要改 SKILL.md 或脚本**。
+- 环境变量（`LOG_BASE_URL` / `LOG_POLL_INTERVAL` / `LOG_TIMEOUT_SEC` / `LOG_OUT_DIR` / `LOG_WATCHES`）仍可临时覆盖。
+- CLI 参数仍优先级最高（`--config` / `--base-url` / `--out` / `--interval` / `--timeout` / `--watch`）。
+- `paths.watches` 与 `--watch` 同时存在时，**CLI 优先**。
+
+### 模板（`config.yaml`）
+
+参考同目录的 `config.yaml`：
+
+```yaml
+log_service:
+  url: "http://81.70.210.89:8080"
+  poll_interval_sec: 10
+  timeout_sec: 1800
+
+paths:
+  out_dir: "./_cicd_logs"
+  watches: []          # 留空时必须用 --watch 显式指定
+
+work_dir: ""           # 几个仓库的共同父目录（仅作文档锚点）
+
+repos:
+  bgw:
+    name: "BrowserGateway"
+    path: "/path/to/sbg/BrowserGateway"
+  gids:
+    name: "GlobalInstanceDeliverService"
+    path: "/path/to/sbg/GlobalInstanceDeliverService"
+  mc:
+    name: "MediaCacheService"
+    path: "/path/to/sbg/MediaCacheService"
+```
+
+### 子代理 prompt 中的 `<WORK_DIR>`
+
+阶段 1 把子代理派出去时，**用 `config.yaml` 里 `repos.<abbr>.path` 的实际值替换 `<WORK_DIR>`**；如果 `repos.<abbr>.path` 是空，先停下问主代理要路径，**不要**让子代理自己猜。
 
 ## 硬性约束（违反任何一条都算 skill 失败）
 

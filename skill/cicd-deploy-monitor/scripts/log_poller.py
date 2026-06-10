@@ -60,6 +60,11 @@ ALLOWED_NAMES = {"bgw", "gids", "mc"}
 DEFAULT_POLL_INTERVAL = 10        # 秒
 DEFAULT_TIMEOUT_SEC = 30 * 60    # 30 分钟
 
+# skill 默认配置文件路径（脚本同目录上一级），可用 --config 覆盖
+DEFAULT_CONFIG_PATH = (
+    Path(__file__).resolve().parent.parent / "config.yaml"
+)
+
 
 # ---------------------------------------------------------------------------
 # 数据结构
@@ -88,6 +93,102 @@ class State:
         self.state_file = self.out_dir / "state.json"
         self.raw_dir.mkdir(parents=True, exist_ok=True)
         self.extracted_dir.mkdir(parents=True, exist_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# 配置加载
+# ---------------------------------------------------------------------------
+
+def _coerce(value: str):
+    """YAML 字面量到 Python 值。仅支持本 skill 需要的标量/列表/字典。"""
+    v = value.strip()
+    if v == "" or v.lower() in {"null", "~"}:
+        return None
+    if (v.startswith('"') and v.endswith('"')) or (
+        v.startswith("'") and v.endswith("'")
+    ):
+        return v[1:-1]
+    if v.lower() == "true":
+        return True
+    if v.lower() == "false":
+        return False
+    if re.fullmatch(r"-?\d+", v):
+        return int(v)
+    if re.fullmatch(r"-?\d+\.\d+", v):
+        return float(v)
+    return v
+
+
+def load_config(path: Optional[Path]) -> dict:
+    """
+    读取 YAML 配置文件。优先用 PyYAML（已装），回退到内置极简解析（仅
+    支持本 skill 需要的标量/嵌套字典/列表，且 key 后必须为 - item 而非
+    嵌套字典）。文件不存在返回 {}。
+    """
+    if path is None or not Path(path).exists():
+        return {}
+    text = Path(path).read_text("utf-8")
+    try:
+        import yaml  # type: ignore
+        data = yaml.safe_load(text) or {}
+        if not isinstance(data, dict):
+            raise ValueError(
+                f"config {path} 顶层必须是字典，实际是 {type(data).__name__}"
+            )
+        return data
+    except ImportError:
+        pass
+    # 回退路径
+    return _mini_yaml_load(text, str(path))
+
+
+def _mini_yaml_load(text: str, path: str) -> dict:
+    """PyYAML 不可用时的兜底。能力：嵌套 dict、标量、列表（仅 - item 形式）。
+    块嵌套字典/列表、复杂引用、类型标签等一概不支持。"""
+    root: Dict[str, object] = {}
+    stack: List[Tuple[int, object, str]] = [(-1, root, "dict")]
+    last_list_under: Dict[int, list] = {}
+    for lineno, raw in enumerate(text.splitlines(), 1):
+        line = raw.split("#", 1)[0].rstrip()
+        if not line.strip():
+            continue
+        m_list = re.match(r"^(\s*)- (.*)$", line)
+        if m_list:
+            indent = len(m_list.group(1))
+            item = _coerce(m_list.group(2).strip())
+            while stack and stack[-1][0] >= indent:
+                stack.pop()
+            if not stack or stack[-1][2] != "dict":
+                raise ValueError(
+                    f"config {path}:{lineno} 列表找不到父字典: {raw!r}"
+                )
+            target = last_list_under.get(id(stack[-1][1]))
+            if target is None:
+                raise ValueError(
+                    f"config {path}:{lineno} 列表项前无对应 key: {raw!r}"
+                )
+            target.append(item)
+            continue
+        m = re.match(r"^(\s*)([^:]+?):\s*(.*)$", line)
+        if not m:
+            raise ValueError(f"config {path}:{lineno} 无法解析: {raw!r}")
+        indent = len(m.group(1))
+        key = m.group(2).strip()
+        rest = m.group(3).strip()
+        while stack and stack[-1][0] >= indent:
+            stack.pop()
+        if not stack or stack[-1][2] != "dict":
+            raise ValueError(
+                f"config {path}:{lineno} 父节点不是字典: {raw!r}"
+            )
+        parent_dict = stack[-1][1]
+        if rest == "":
+            new_dict: Dict[str, object] = {}
+            parent_dict[key] = new_dict
+            stack.append((indent, new_dict, "dict"))
+        else:
+            parent_dict[key] = _coerce(rest)
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -190,20 +291,36 @@ def extract_zip(zip_path: Path, out_dir: Path) -> List[Path]:
 # 主流程
 # ---------------------------------------------------------------------------
 
-def build_state(args: argparse.Namespace) -> State:
+def build_state(args: argparse.Namespace, cfg: dict) -> State:
+    log_svc = cfg.get("log_service", {}) if isinstance(cfg, dict) else {}
+    paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
+
     if args.watch:
         watches_list = [parse_watch(w) for w in args.watch]
     else:
         env = os.environ.get("LOG_WATCHES", "").strip()
-        if not env:
-            raise SystemExit(
-                "未指定 watch：传 --watch name=commit，或设环境变量 LOG_WATCHES"
+        cfg_watches = ""
+        if isinstance(paths.get("watches"), list):
+            cfg_watches = ",".join(
+                str(x) for x in paths["watches"] if str(x).strip()
             )
-        watches_list = parse_watches_from_env(env)
+        merged = env or cfg_watches
+        if not merged:
+            raise SystemExit(
+                "未指定 watch：传 --watch name=commit，或设环境变量 LOG_WATCHES，"
+                "或在 config.yaml 的 paths.watches 列表里写"
+            )
+        watches_list = parse_watches_from_env(merged)
 
-    base_url = args.base_url or os.environ.get("LOG_BASE_URL", DEFAULT_BASE_URL)
+    base_url = (
+        args.base_url
+        or os.environ.get("LOG_BASE_URL")
+        or log_svc.get("url", DEFAULT_BASE_URL)
+    )
     out_dir = Path(
-        args.out_dir or os.environ.get("LOG_OUT_DIR", "./_cicd_logs")
+        args.out_dir
+        or os.environ.get("LOG_OUT_DIR")
+        or paths.get("out_dir", "./_cicd_logs")
     ).resolve()
 
     watches = {
@@ -296,15 +413,25 @@ def process_one_file(
 
 
 def run(args: argparse.Namespace) -> int:
+    cfg_path = Path(args.config) if args.config else DEFAULT_CONFIG_PATH
+    cfg = load_config(cfg_path)
+    log_svc = cfg.get("log_service", {}) if isinstance(cfg, dict) else {}
+
     interval = int(
-        args.interval or os.environ.get("LOG_POLL_INTERVAL", DEFAULT_POLL_INTERVAL)
+        args.interval
+        or os.environ.get("LOG_POLL_INTERVAL")
+        or log_svc.get("poll_interval_sec", DEFAULT_POLL_INTERVAL)
     )
     timeout = int(
-        args.timeout or os.environ.get("LOG_TIMEOUT_SEC", DEFAULT_TIMEOUT_SEC)
+        args.timeout
+        or os.environ.get("LOG_TIMEOUT_SEC")
+        or log_svc.get("timeout_sec", DEFAULT_TIMEOUT_SEC)
     )
 
-    state = build_state(args)
+    state = build_state(args, cfg)
     load_existing_state(state)
+    if cfg_path.exists():
+        log(f"已加载配置: {cfg_path}")
 
     log(f"日志服务: {state.base_url}")
     log(f"输出目录: {state.out_dir}")
@@ -378,6 +505,10 @@ def main() -> int:
     p.add_argument(
         "--watch", action="append", default=[],
         help="name=commit 形式的 watch，可重复传；name 仅限 bgw/gids/mc",
+    )
+    p.add_argument(
+        "--config", default=None,
+        help=f"配置文件路径，默认 {DEFAULT_CONFIG_PATH}",
     )
     p.add_argument(
         "--base-url", default=None,

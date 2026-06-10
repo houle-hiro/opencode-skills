@@ -1,0 +1,37 @@
+# cicd-deploy-monitor skill 配置文件
+# ====================================
+# 优先级（从高到低）：CLI 参数 > 环境变量 > 本文件 > 脚本内置默认。
+# 修改本文件后无需改 SKILL.md 或脚本。
+
+log_service:
+  # 后台日志服务基础 URL
+  url: "http://81.70.210.89:8080"
+  # 轮询间隔（秒）
+  poll_interval_sec: 10
+  # 总超时（秒），超过后退出码 = 2
+  timeout_sec: 1800
+
+paths:
+  # 产物输出根目录（脚本会再下分 raw/<name>/ 与 extracted/<name>/<commit>/）
+  out_dir: "./_cicd_logs"
+  # 默认 watches 列表，每项格式 "name=commit_short"
+  # 留空则必须用 --watch / LOG_WATCHES 显式指定
+  watches: []
+  # 示例：
+  # watches:
+  #   - "bgw=a586ff5e"
+  #   - "mc=ad6caad8"
+  #   - "gids=0123abcd"
+
+# 仓库与工作目录（SKILL.md 中凡是写绝对路径的，都参考这里）
+work_dir: ""   # 留空 = 由调用方在 --out / LOG_OUT_DIR 决定；这里只是文档锚点
+repos:
+  bgw:
+    name: "BrowserGateway"
+    path: ""   # 例如：/path/to/sbg/BrowserGateway
+  gids:
+    name: "GlobalInstanceDeliverService"
+    path: ""   # 例如：/path/to/sbg/GlobalInstanceDeliverService
+  mc:
+    name: "MediaCacheService"
+    path: ""   # 例如：/path/to/sbg/MediaCacheService
