@@ -32,6 +32,7 @@ CI/CD 日志轮询脚本
 from __future__ import annotations
 
 import argparse
+import configparser
 import json
 import os
 import re
@@ -62,7 +63,7 @@ DEFAULT_TIMEOUT_SEC = 30 * 60    # 30 分钟
 
 # skill 默认配置文件路径（脚本同目录上一级），可用 --config 覆盖
 DEFAULT_CONFIG_PATH = (
-    Path(__file__).resolve().parent.parent / "config.yaml"
+    Path(__file__).resolve().parent.parent / "config.ini"
 )
 
 
@@ -99,96 +100,53 @@ class State:
 # 配置加载
 # ---------------------------------------------------------------------------
 
-def _coerce(value: str):
-    """YAML 字面量到 Python 值。仅支持本 skill 需要的标量/列表/字典。"""
-    v = value.strip()
-    if v == "" or v.lower() in {"null", "~"}:
-        return None
-    if (v.startswith('"') and v.endswith('"')) or (
-        v.startswith("'") and v.endswith("'")
-    ):
-        return v[1:-1]
-    if v.lower() == "true":
-        return True
-    if v.lower() == "false":
-        return False
-    if re.fullmatch(r"-?\d+", v):
-        return int(v)
-    if re.fullmatch(r"-?\d+\.\d+", v):
-        return float(v)
-    return v
+def _to_int(value: str, default: int) -> int:
+    try:
+        return int(value.strip())
+    except (TypeError, ValueError):
+        return default
 
 
 def load_config(path: Optional[Path]) -> dict:
-    """
-    读取 YAML 配置文件。优先用 PyYAML（已装），回退到内置极简解析（仅
-    支持本 skill 需要的标量/嵌套字典/列表，且 key 后必须为 - item 而非
-    嵌套字典）。文件不存在返回 {}。
+    """读取 INI 配置文件（标准库 configparser）。文件不存在返回 {}。
+
+    期望分组：
+      [log_service]    url / poll_interval_sec / timeout_sec
+      [paths]          out_dir / watches
+      [repos]          bgw_path / gids_path / mc_path / work_dir
     """
     if path is None or not Path(path).exists():
         return {}
-    text = Path(path).read_text("utf-8")
-    try:
-        import yaml  # type: ignore
-        data = yaml.safe_load(text) or {}
-        if not isinstance(data, dict):
-            raise ValueError(
-                f"config {path} 顶层必须是字典，实际是 {type(data).__name__}"
-            )
-        return data
-    except ImportError:
-        pass
-    # 回退路径
-    return _mini_yaml_load(text, str(path))
-
-
-def _mini_yaml_load(text: str, path: str) -> dict:
-    """PyYAML 不可用时的兜底。能力：嵌套 dict、标量、列表（仅 - item 形式）。
-    块嵌套字典/列表、复杂引用、类型标签等一概不支持。"""
-    root: Dict[str, object] = {}
-    stack: List[Tuple[int, object, str]] = [(-1, root, "dict")]
-    last_list_under: Dict[int, list] = {}
-    for lineno, raw in enumerate(text.splitlines(), 1):
-        line = raw.split("#", 1)[0].rstrip()
-        if not line.strip():
-            continue
-        m_list = re.match(r"^(\s*)- (.*)$", line)
-        if m_list:
-            indent = len(m_list.group(1))
-            item = _coerce(m_list.group(2).strip())
-            while stack and stack[-1][0] >= indent:
-                stack.pop()
-            if not stack or stack[-1][2] != "dict":
-                raise ValueError(
-                    f"config {path}:{lineno} 列表找不到父字典: {raw!r}"
-                )
-            target = last_list_under.get(id(stack[-1][1]))
-            if target is None:
-                raise ValueError(
-                    f"config {path}:{lineno} 列表项前无对应 key: {raw!r}"
-                )
-            target.append(item)
-            continue
-        m = re.match(r"^(\s*)([^:]+?):\s*(.*)$", line)
-        if not m:
-            raise ValueError(f"config {path}:{lineno} 无法解析: {raw!r}")
-        indent = len(m.group(1))
-        key = m.group(2).strip()
-        rest = m.group(3).strip()
-        while stack and stack[-1][0] >= indent:
-            stack.pop()
-        if not stack or stack[-1][2] != "dict":
-            raise ValueError(
-                f"config {path}:{lineno} 父节点不是字典: {raw!r}"
-            )
-        parent_dict = stack[-1][1]
-        if rest == "":
-            new_dict: Dict[str, object] = {}
-            parent_dict[key] = new_dict
-            stack.append((indent, new_dict, "dict"))
-        else:
-            parent_dict[key] = _coerce(rest)
-    return root
+    cp = configparser.ConfigParser()
+    cp.read(path, encoding="utf-8")
+    cfg: dict = {
+        "log_service": {
+            "url": cp.get("log_service", "url", fallback=DEFAULT_BASE_URL),
+            "poll_interval_sec": _to_int(
+                cp.get("log_service", "poll_interval_sec", fallback=""),
+                DEFAULT_POLL_INTERVAL,
+            ),
+            "timeout_sec": _to_int(
+                cp.get("log_service", "timeout_sec", fallback=""),
+                DEFAULT_TIMEOUT_SEC,
+            ),
+        },
+        "paths": {
+            "out_dir": cp.get("paths", "out_dir", fallback="./_cicd_logs"),
+            "watches": [
+                w.strip()
+                for w in cp.get("paths", "watches", fallback="").split(",")
+                if w.strip()
+            ],
+        },
+        "repos": {
+            "work_dir": cp.get("repos", "work_dir", fallback=""),
+            "bgw_path": cp.get("repos", "bgw_path", fallback=""),
+            "gids_path": cp.get("repos", "gids_path", fallback=""),
+            "mc_path": cp.get("repos", "mc_path", fallback=""),
+        },
+    }
+    return cfg
 
 
 # ---------------------------------------------------------------------------
