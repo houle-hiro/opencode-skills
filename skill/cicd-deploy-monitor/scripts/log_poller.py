@@ -83,7 +83,7 @@ class Watch:
 class State:
     base_url: str
     out_dir: Path
-    watches: Dict[str, Watch]   # key = name
+    watches: Dict[str, Watch]   # key = "<name>:<commit>"，避免不同 commit 复用状态
     raw_dir: Path = field(init=False)
     extracted_dir: Path = field(init=False)
     state_file: Path = field(init=False)
@@ -282,7 +282,8 @@ def build_state(args: argparse.Namespace, cfg: dict) -> State:
     ).resolve()
 
     watches = {
-        name: Watch(name=name, commit=commit) for name, commit in watches_list
+        f"{name}:{commit}": Watch(name=name, commit=commit)
+        for name, commit in watches_list
     }
     return State(base_url=base_url, out_dir=out_dir, watches=watches)
 
@@ -296,10 +297,10 @@ def load_existing_state(state: State) -> None:
     except Exception as e:  # noqa: BLE001
         log(f"读取 state.json 失败：{e}，将重新开始")
         return
-    for name, w in data.get("watches", {}).items():
-        if name in state.watches:
-            state.watches[name].files = list(w.get("files", []))
-            state.watches[name].done = bool(w.get("done", False))
+    for key, w in data.get("watches", {}).items():
+        if key in state.watches:
+            state.watches[key].files = list(w.get("files", []))
+            state.watches[key].done = bool(w.get("done", False))
 
 
 def save_state(state: State) -> None:
