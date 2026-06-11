@@ -409,18 +409,18 @@ def run(args: argparse.Namespace) -> int:
         round_idx += 1
         log(f"--- 第 {round_idx} 轮查询 ---")
         all_done = True
-        for name, w in state.watches.items():
+        for key, w in state.watches.items():
             if w.done:
                 continue
             all_done = False
             try:
                 files = query_files(
-                    session, state.base_url, name, w.commit
+                    session, state.base_url, w.name, w.commit
                 )
             except Exception as e:  # noqa: BLE001
-                log(f"  ! {name} 查询失败：{e}")
+                log(f"  ! {key} 查询失败：{e}")
                 continue
-            log(f"  · {name} (commit={w.commit}) 命中 {len(files)} 个文件")
+            log(f"  · {key} (commit={w.commit}) 命中 {len(files)} 个文件")
             if not files:
                 continue
             # 取第一个匹配（最新/唯一）
