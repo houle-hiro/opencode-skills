@@ -9,11 +9,9 @@ description: 在多仓微服务项目中，端到端完成"需求实现 → 本�
 
 ## 项目结构与仓库缩写
 
-工作目录与仓库列表**全部走配置**，不在脚本/SKILL.md 里写死。每个仓的 `name / path / remote / display_name` 在 `config.yaml` 的 `repos` 列表里声明。`name` 字段就是流水线判定本次产物归属的 key，**简称 `<abbr>`**。
+每个仓在 `config.yaml` 的 `repos` 列表里声明四元组：`name / display_name / path / remote`。其中 `name` 字段就是流水线判定本次产物归属的 key，下文记作 `<abbr>`。
 
-> **`<abbr>` 是流水线判定本次产物归属的 key**：后台日志 zip 文件名格式 `{name}_{commit_id}_{datetime}.zip`，其中 `{name}` 必须与 `repos[].name` 一致。
->
-> **`commit_id` 段实际就是 git 短 hash**（流水线这边只截前 8 位左右，不放完整 40/64 位 SHA）。例：`mc_a586ff5e_20260609202544.zip` 对应 `mc` 仓某次提交的短 hash `a586ff5e`。所以阶段 2 拿到 `git rev-parse --short=8 HEAD` 即可，**不要再尝试传完整 SHA** 给查询/下载接口。
+> 后台日志 zip 文件名格式 `{name}_{commit_id}_{datetime}.zip`，其中 `{name}` 必须与 `repos[].name` 一致；`commit_id` 是 git 短 hash（流水线只截前 8 位）。例：`mc_a586ff5e_20260609202544.zip` 对应 `mc` 仓某次提交 `a586ff5e`。所以阶段 2 拿到 `git rev-parse --short=8 HEAD` 即可，不要传完整 SHA。
 
 ## 工作流（必须严格按顺序执行）
 
@@ -52,7 +50,7 @@ task(
 
 1. cd <Repo>，先 cat AGENTS.md / README.md / docs/，了解构建/启动方式。
 2. 用 grep/glob 定位与本次需求相关的文件，给出"计划改哪些文件、怎么改"。
-3. 改代码。**禁止添加任何注释**（除非用户明确要求）。
+3. 改代码。遵循该仓库既有风格。
 4. 本地按该仓库既有方式跑构建 + 主路径测试，至少要看到一次"主路径未坏"的证据。
 5. 汇报给我：
    - 改了哪些文件（path:line 列表）
@@ -167,13 +165,13 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py \
 
 ## 配置文件
 
-把**所有与具体环境绑定的路径与 URL** 抽到 `config.yaml`，**不**在 SKILL.md / 脚本里写死。同一份 skill 仓库可被不同项目/不同机器复用。
+`config.yaml` 集中存放所有与具体环境绑定的路径与 URL（与项目绑定）。同一份 skill 仓库可被不同项目复用。
 
 依赖 PyYAML（`pip install pyyaml`）。
 
 **优先级（高 → 低）**：CLI 参数 > `config.yaml` > 脚本内置默认。
 
-> **没有环境变量入口**——watch / url / interval / timeout / out 全走命令行参数。`watches` 不写在配置里，每次调用 `--watch` 传入。
+阶段 3 启动日志轮询时，`--watch name=commit` 必须通过 CLI 传入（可重复多次）；其它参数（url / out_dir / interval / timeout）走 `config.yaml`，CLI 对应参数可临时覆盖。
 
 ### 配置项
 
@@ -191,10 +189,10 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py \
 
 ### 行为
 
-- **增删仓 = 增删 `repos` 列表里的一项**，**不需要改 SKILL.md 或脚本**。
-- 仓缩写在脚本里**没有白名单**，`--watch foo=xxx` 也能跑（前提是服务端有 `foo_*.zip`）。
-- `watches` 不走配置，必须用 CLI `--watch name=commit`（可重复传多个）。
-- 其它项（url / out_dir / interval / timeout）走配置；CLI 对应参数（`--base-url` / `--out` / `--interval` / `--timeout`）可临时覆盖。
+- **增删仓 = 增删 `repos` 列表里的一项**。
+- 仓缩写由服务端产物决定：`--watch <name>=<commit>` 中的 `<name>` 必须与某条 `repos[].name` 一致（即流水线 zip 文件名首段）。
+- `--watch` 每次调用都必须从 CLI 传入，配置里不存放待轮询条目。
+- 其它项（url / out_dir / interval / timeout）走 `config.yaml`；CLI 对应参数（`--base-url` / `--out` / `--interval` / `--timeout`）可临时覆盖。
 
 ### 模板（`config.yaml`）
 
@@ -241,4 +239,3 @@ repos:
 4. **绝不在没拉日志 / 没读日志**的情况下宣布"通过"。
 5. **绝不在没有新 commit** 的情况下重推同一份代码当作"修复"。
 6. **绝不在死循环里改 5 轮以上**而不告诉用户。
-7. 不要在代码里加注释（除非用户明确要求）。
