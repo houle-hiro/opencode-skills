@@ -32,7 +32,6 @@ CI/CD 日志轮询脚本
 from __future__ import annotations
 
 import argparse
-import configparser
 import json
 import os
 import re
@@ -44,6 +43,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
+import yaml
 
 # log-service 端点
 DEFAULT_BASE_URL = "http://81.70.210.89:8080"
@@ -54,16 +54,13 @@ DOWNLOAD_URL_SUFFIX = "/download"
 # 文件名正则（与 log-service/API.md 一致）
 FILENAME_RE = re.compile(r"^[a-zA-Z0-9\-]+_[a-zA-Z0-9\-]+_\d{14}\.zip$")
 
-# 项目允许的 name 集合
-ALLOWED_NAMES = {"bgw", "gids", "mc"}
-
 # 默认参数
 DEFAULT_POLL_INTERVAL = 10        # 秒
 DEFAULT_TIMEOUT_SEC = 30 * 60    # 30 分钟
 
 # skill 默认配置文件路径（脚本同目录上一级），可用 --config 覆盖
 DEFAULT_CONFIG_PATH = (
-    Path(__file__).resolve().parent.parent / "config.ini"
+    Path(__file__).resolve().parent.parent / "config.yaml"
 )
 
 
@@ -73,7 +70,7 @@ DEFAULT_CONFIG_PATH = (
 
 @dataclass
 class Watch:
-    name: str               # 仓库缩写 bgw/gids/mc
+    name: str               # 仓库缩写（来自 --watch 或 config.yaml repos[].name）
     commit: str             # commit_id（完整或前缀）
     files: List[str] = field(default_factory=list)   # 已查询到并下载过的文件名
     done: bool = False      # 是否已经下载到第一个（或指定）文件
@@ -100,51 +97,47 @@ class State:
 # 配置加载
 # ---------------------------------------------------------------------------
 
-def _to_int(value: str, default: int) -> int:
+def _to_int(value, default: int) -> int:
     try:
-        return int(value.strip())
+        return int(value)
     except (TypeError, ValueError):
         return default
 
 
 def load_config(path: Optional[Path]) -> dict:
-    """读取 INI 配置文件（标准库 configparser）。文件不存在返回 {}。
+    """读取 YAML 配置文件（需 PyYAML）。文件不存在返回 {}。
 
-    期望分组：
-      [log_service]    url / poll_interval_sec / timeout_sec
-      [paths]          out_dir / watches
-      [repos]          bgw_path / gids_path / mc_path / work_dir
+    期望结构：
+      log_service: {url, poll_interval_sec, timeout_sec}
+      paths:       {out_dir, watches: [{name, commit}, ...]}
+      repos:       [{name, path, remote?, display_name?}, ...]
+      docs:        {work_dir}    # 仅文档锚点，脚本不读
     """
     if path is None or not Path(path).exists():
         return {}
-    cp = configparser.ConfigParser()
-    cp.read(path, encoding="utf-8")
+    with open(path, "r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    if not isinstance(raw, dict):
+        log(f"!! 警告：{path} 顶层不是 dict，已忽略")
+        return {}
+    log_svc = raw.get("log_service") or {}
+    paths = raw.get("paths") or {}
     cfg: dict = {
         "log_service": {
-            "url": cp.get("log_service", "url", fallback=DEFAULT_BASE_URL),
+            "url": str(log_svc.get("url") or DEFAULT_BASE_URL),
             "poll_interval_sec": _to_int(
-                cp.get("log_service", "poll_interval_sec", fallback=""),
-                DEFAULT_POLL_INTERVAL,
+                log_svc.get("poll_interval_sec"), DEFAULT_POLL_INTERVAL
             ),
             "timeout_sec": _to_int(
-                cp.get("log_service", "timeout_sec", fallback=""),
-                DEFAULT_TIMEOUT_SEC,
+                log_svc.get("timeout_sec"), DEFAULT_TIMEOUT_SEC
             ),
         },
         "paths": {
-            "out_dir": cp.get("paths", "out_dir", fallback="./_cicd_logs"),
-            "watches": [
-                w.strip()
-                for w in cp.get("paths", "watches", fallback="").split(",")
-                if w.strip()
-            ],
+            "out_dir": str(paths.get("out_dir") or "./_cicd_logs"),
+            "watches": paths.get("watches") or [],
         },
-        "repos": {
-            "work_dir": cp.get("repos", "work_dir", fallback=""),
-            "bgw_path": cp.get("repos", "bgw_path", fallback=""),
-            "gids_path": cp.get("repos", "gids_path", fallback=""),
-            "mc_path": cp.get("repos", "mc_path", fallback=""),
-        },
+        "repos": raw.get("repos") or [],
+        "docs": raw.get("docs") or {},
     }
     return cfg
 
@@ -164,8 +157,6 @@ def parse_watch(spec: str) -> Tuple[str, str]:
     name, commit = spec.split("=", 1)
     name = name.strip()
     commit = commit.strip()
-    if name not in ALLOWED_NAMES:
-        raise ValueError(f"--watch 名称非法 {name!r}，只允许 {sorted(ALLOWED_NAMES)}")
     if not name or not commit:
         raise ValueError(f"--watch 名称或 commit 为空：{spec!r}")
     return name, commit
@@ -257,18 +248,22 @@ def build_state(args: argparse.Namespace, cfg: dict) -> State:
         watches_list = [parse_watch(w) for w in args.watch]
     else:
         env = os.environ.get("LOG_WATCHES", "").strip()
-        cfg_watches = ""
-        if isinstance(paths.get("watches"), list):
-            cfg_watches = ",".join(
-                str(x) for x in paths["watches"] if str(x).strip()
-            )
+        cfg_watches: List[Tuple[str, str]] = []
+        for w in paths.get("watches") or []:
+            if isinstance(w, dict):
+                cfg_watches.append((str(w["name"]), str(w["commit"])))
+            elif isinstance(w, str) and "=" in w:
+                cfg_watches.append(parse_watch(w))
         merged = env or cfg_watches
         if not merged:
             raise SystemExit(
                 "未指定 watch：传 --watch name=commit，或设环境变量 LOG_WATCHES，"
                 "或在 config.yaml 的 paths.watches 列表里写"
             )
-        watches_list = parse_watches_from_env(merged)
+        if isinstance(merged, str):
+            watches_list = parse_watches_from_env(merged)
+        else:
+            watches_list = merged
 
     base_url = (
         args.base_url

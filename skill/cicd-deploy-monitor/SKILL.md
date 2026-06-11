@@ -1,23 +1,17 @@
 ---
 name: cicd-deploy-monitor
-description: 在多仓微服务（BrowserGateway / GlobalInstanceDeliverService / MediaCacheService）项目中，端到端完成"需求实现 → 本地测试 → Git 提交推送 → 拉取并解压 CI/CD 日志包 → AI 解读日志判断编译/运行/测试是否通过 → 必要时修复代码并重提交"的循环。实现阶段通过派 `general` 子代理完成；路径与日志服务 URL 通过 `config.yaml` 配置（不写死绝对路径）。使用场景：用户提出一个业务需求，且希望自动驱动公司内部 CI/CD 流水线并基于真实运行/评测日志决定是否需要再修复。Use ONLY when the user is in the sbg monorepo and wants a requirement to flow through the internal CI/CD pipeline with pipeline log verification.
+description: 在多仓微服务项目中，端到端完成"需求实现 → 本地测试 → Git 提交推送 → 拉取并解压 CI/CD 日志包 → AI 解读日志判断编译/运行/测试是否通过 → 必要时修复代码并重提交"的循环。实现阶段通过派 `general` 子代理完成；仓库列表与日志服务 URL 全部走 `config.yaml` 的 `repos` 列表配置（不写死绝对路径，不绑定具体仓名），同一份 skill 可被任意多仓项目复用。使用场景：用户提出一个业务需求，且希望自动驱动公司内部 CI/CD 流水线并基于真实运行/评测日志决定是否需要再修复。Use ONLY when the user has a multi-repo project and wants a requirement to flow through the internal CI/CD pipeline with pipeline log verification.
 ---
 
-# CI/CD 部署监控 Skill（sbg 多仓项目）
+# CI/CD 部署监控 Skill（多仓项目通用）
 
 本 skill 驱动一个完整的"开发 → 推送 → 流水线 → 拉日志 → AI 判定 → 修复或通过"闭环。
 
 ## 项目结构与仓库缩写
 
-工作目录：在 `config.yaml` 里以 `<config.repos.*.path>` 形式配置实际路径（占位时也可直接写绝对路径）。文档示例统一用 `<WORK_DIR>` 指代。
+工作目录与仓库列表**全部走配置**，不在脚本/SKILL.md 里写死。每个仓的 `name / path / remote / display_name` 在 `config.yaml` 的 `repos` 列表里声明。`name` 字段就是流水线判定本次产物归属的 key，**简称 `<abbr>`**。
 
-| 仓库目录 | 仓库名 | 缩写 | 远程 (ssh) |
-|---|---|---|---|
-| `BrowserGateway/` | BrowserGateway | `bgw` | `git@github.com:Cogather/BrowserGateway.git` |
-| `GlobalInstanceDeliverService/` | GlobalInstanceDeliverService | `gids` | `git@github.com:Cogather/GlobalInstanceDeliverService.git` |
-| `MediaCacheService/` | MediaCacheService | `mc` | `git@github.com:Cogather/MediaCacheService.git` |
-
-> **缩写是流水线判定本次产物归属的 key**：后台日志 zip 文件名格式 `{name}_{commit_id}_{datetime}.zip`，其中 `{name}` 必须用 `bgw` / `gids` / `mc` 之一。
+> **`<abbr>` 是流水线判定本次产物归属的 key**：后台日志 zip 文件名格式 `{name}_{commit_id}_{datetime}.zip`，其中 `{name}` 必须与 `repos[].name` 一致。
 >
 > **`commit_id` 段实际就是 git 短 hash**（流水线这边只截前 8 位左右，不放完整 40/64 位 SHA）。例：`mc_a586ff5e_20260609202544.zip` 对应 `mc` 仓某次提交的短 hash `a586ff5e`。所以阶段 2 拿到 `git rev-parse --short=8 HEAD` 即可，**不要再尝试传完整 SHA** 给查询/下载接口。
 
@@ -185,6 +179,8 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py
 
 把**所有与具体环境绑定的路径与 URL** 抽到 `config.yaml`，**不**在 SKILL.md / 脚本里写死。同一份 skill 仓库可被不同项目/不同机器复用。
 
+依赖 PyYAML（`pip install pyyaml`）。
+
 **优先级（高 → 低）**：CLI 参数 > 环境变量 > `config.yaml` > 脚本内置默认。
 
 ### 配置项
@@ -195,15 +191,17 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py
 | `log_service.poll_interval_sec` | int | 轮询间隔（秒） | `10` |
 | `log_service.timeout_sec` | int | 总超时（秒），超时返回码 2 | `1800` |
 | `paths.out_dir` | string | 产物输出根目录 | `./_cicd_logs` |
-| `paths.watches` | list[string] | 默认 `name=commit` 列表，**省略时必须用 `--watch` 或 `LOG_WATCHES`** | `[]` |
-| `repos.bgw.path` | string | BrowserGateway 仓库本地绝对路径 | `""` |
-| `repos.gids.path` | string | GlobalInstanceDeliverService 仓库本地绝对路径 | `""` |
-| `repos.mc.path` | string | MediaCacheService 仓库本地绝对路径 | `""` |
-| `work_dir` | string | 文档锚点，等价于"几个仓库的共同父目录" | `""` |
+| `paths.watches` | list[{name, commit}] | 默认 watch 列表，**留空时必须用 `--watch` 或 `LOG_WATCHES`** | `[]` |
+| `repos[].name` | string | 仓缩写（流水线 zip 首段 == 此值，--watch 的 name 也是此值） | 必填 |
+| `repos[].display_name` | string | 人类可读的全名（仅文档展示用） | `""` |
+| `repos[].path` | string | 本地仓库绝对路径 | `""` |
+| `repos[].remote` | string | ssh URL（子代理 push 时用） | `""` |
+| `docs.work_dir` | string | 文档锚点，等价于"几个仓库的共同父目录" | `""` |
 
 ### 行为
 
-- 改 `config.yaml` 即可换环境，**不需要改 SKILL.md 或脚本**。
+- **增删仓 = 增删 `repos` 列表里的一项**，**不需要改 SKILL.md 或脚本**。
+- 仓缩写在脚本里**没有白名单**，`--watch foo=xxx` 也能跑（前提是服务端有 `foo_*.zip`）。
 - 环境变量（`LOG_BASE_URL` / `LOG_POLL_INTERVAL` / `LOG_TIMEOUT_SEC` / `LOG_OUT_DIR` / `LOG_WATCHES`）仍可临时覆盖。
 - CLI 参数仍优先级最高（`--config` / `--base-url` / `--out` / `--interval` / `--timeout` / `--watch`）。
 - `paths.watches` 与 `--watch` 同时存在时，**CLI 优先**。
@@ -220,25 +218,35 @@ log_service:
 
 paths:
   out_dir: "./_cicd_logs"
-  watches: []          # 留空时必须用 --watch 显式指定
+  watches: []            # 留空时必须用 --watch 显式指定
+  # 模板示例：
+  # watches:
+  #   - {name: bgw, commit: a586ff5e}
+  #   - {name: mc,  commit: ad6caad8}
 
-work_dir: ""           # 几个仓库的共同父目录（仅作文档锚点）
+docs:
+  work_dir: "/path/to/project"   # 几个仓库的共同父目录（仅文档锚点）
 
 repos:
-  bgw:
-    name: "BrowserGateway"
-    path: "/path/to/sbg/BrowserGateway"
-  gids:
-    name: "GlobalInstanceDeliverService"
-    path: "/path/to/sbg/GlobalInstanceDeliverService"
-  mc:
-    name: "MediaCacheService"
-    path: "/path/to/sbg/MediaCacheService"
+  - name: bgw
+    display_name: BrowserGateway
+    path: "/path/to/project/BrowserGateway"
+    remote: "git@github.com:Cogather/BrowserGateway.git"
+
+  - name: gids
+    display_name: GlobalInstanceDeliverService
+    path: "/path/to/project/GlobalInstanceDeliverService"
+    remote: "git@github.com:Cogather/GlobalInstanceDeliverService.git"
+
+  - name: mc
+    display_name: MediaCacheService
+    path: "/path/to/project/MediaCacheService"
+    remote: "git@github.com:Cogather/MediaCacheService.git"
 ```
 
-### 子代理 prompt 中的 `<WORK_DIR>`
+### 子代理 prompt 中的 `<WORK_DIR>` 与 `<REMOTE>`
 
-阶段 1 把子代理派出去时，**用 `config.yaml` 里 `repos.<abbr>.path` 的实际值替换 `<WORK_DIR>`**；如果 `repos.<abbr>.path` 是空，先停下问主代理要路径，**不要**让子代理自己猜。
+阶段 1 把子代理派出去时，**用 `config.yaml` 里 `repos[].name == <abbr>` 那条的 `path` 替换 `<WORK_DIR>`**；如果 `path` 是空，先停下问主代理要路径，**不要**让子代理自己猜。`remote` 同理：留空时让子代理自己问主代理。
 
 ## 硬性约束（违反任何一条都算 skill 失败）
 

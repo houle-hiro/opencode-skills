@@ -1,0 +1,56 @@
+# cicd-deploy-monitor skill 配置文件
+# ====================================
+# YAML 格式，需要 PyYAML（pip install pyyaml）。
+# 优先级（高 → 低）：CLI 参数 > 环境变量 > 本文件 > 脚本内置默认。
+#
+# 关键设计：仓库全在 `repos` 列表里任意增减，脚本与文档不再硬编码仓库缩写。
+# 把本 skill 移到新项目时，只需复制本文件并按 `repos` 模板改 name / path / remote 即可。
+
+log_service:
+  # 后台日志服务基础 URL
+  url: "http://81.70.210.89:8080"
+  # 轮询间隔（秒）
+  poll_interval_sec: 10
+  # 总超时（秒），超过后退出码 = 2
+  timeout_sec: 1800
+
+paths:
+  # 产物输出根目录（脚本会再下分 raw/<name>/ 与 extracted/<name>/<commit>/）
+  out_dir: "./_cicd_logs"
+  # 默认 watches 列表；留空则必须用 --watch / LOG_WATCHES 显式指定
+  watches: []
+  # 示例：
+  # watches:
+  #   - {name: bgw, commit: a586ff5e}
+  #   - {name: mc,  commit: ad6caad8}
+
+# ----------------------------------------------------------------------
+# 仓库列表（核心可扩展点）
+# ----------------------------------------------------------------------
+# 字段：
+#   name         仓缩写（必填）。流水线 zip 文件名首段必须等于此值；
+#                子代理派工时的 "<abbr>" 标识也用此值。
+#   display_name 人类可读的全名（可选），仅作 SKILL.md 文档示例展示用。
+#   path         本地仓库绝对路径（必填）。
+#   remote       ssh URL（可选），子代理要 push 时用；留空则子代理自行询问主代理。
+#
+# 增删仓 = 在本列表里增删一行，无需改 log_poller.py 或 SKILL.md。
+repos:
+  - name: bgw
+    display_name: BrowserGateway
+    path: /home/lele/project/work/csp-ysj/sbg/BrowserGateway
+    remote: git@github.com:Cogather/BrowserGateway.git
+
+  - name: gids
+    display_name: GlobalInstanceDeliverService
+    path: /home/lele/project/work/csp-ysj/sbg/GlobalInstanceDeliverService
+    remote: git@github.com:Cogather/GlobalInstanceDeliverService.git
+
+  - name: mc
+    display_name: MediaCacheService
+    path: /home/lele/project/work/csp-ysj/sbg/MediaCacheService
+    remote: git@github.com:Cogather/MediaCacheService.git
+
+docs:
+  # 几个仓库的共同父目录（仅作文档锚点；脚本不读）
+  work_dir: /home/lele/project/work/csp-ysj/sbg
