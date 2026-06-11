@@ -17,12 +17,6 @@ log_service:
 paths:
   # 产物输出根目录（脚本会再下分 raw/<name>/ 与 extracted/<name>/<commit>/）
   out_dir: "./_cicd_logs"
-  # 默认 watches 列表；留空则必须用 --watch / LOG_WATCHES 显式指定
-  watches: []
-  # 示例：
-  # watches:
-  #   - {name: bgw, commit: a586ff5e}
-  #   - {name: mc,  commit: ad6caad8}
 
 # ----------------------------------------------------------------------
 # 仓库列表（核心可扩展点）

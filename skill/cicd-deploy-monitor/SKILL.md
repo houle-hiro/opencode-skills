@@ -98,40 +98,30 @@ submitted = [
 
 > **bash 工具 timeout 必填**。脚本默认内部 30 分钟超时 + 10 秒轮询，**opencode bash 工具的默认 120s 会直接把它砍掉**。这一条 bash 调用必须显式传一个远大于脚本内超时的 `timeout`（毫秒），**建议 35 分钟 = 2100000ms**。其它 bash 调用维持默认即可，**不要**顺手把别的地方也加大。
 
-**关键参数**（通过环境变量或 CLI 参数传入）：
+**关键参数**（全部走 CLI 参数；url / out_dir / interval / timeout 也可在 `config.yaml` 里给默认值）：
 
-- `LOG_BASE_URL` 默认 `http://81.70.210.89:8080`
-- `LOG_POLL_INTERVAL` 默认 `10` 秒
-- `LOG_OUT_DIR` 默认 `./_cicd_logs/`
-- `LOG_WATCHES` 用 `name=commit` 形式，逗号分隔；`commit` 是阶段 2 拿到的**短 hash**（如 `a586ff5e`），不是完整 SHA。例：
-  `LOG_WATCHES=bgw=<bgw_short>,mc=<mc_short>,gids=<gids_short>`
+- `--watch name=commit` 必填，可重复传；`commit` 是阶段 2 拿到的**短 hash**（如 `a586ff5e`），不是完整 SHA。
+- `--base-url` 默认 `config.yaml` 的 `log_service.url`，再默认 `http://81.70.210.89:8080`
+- `--out` 默认 `config.yaml` 的 `paths.out_dir`，再默认 `./_cicd_logs`
+- `--interval` / `--timeout` 默认值来自 `config.yaml`，再默认 `10` 秒 / `1800` 秒
 
 **轮询逻辑**（脚本已实现，下面是契约）：
 
 1. 启动时对 `submitted` 里每个 `(name, commit)` 调用 `GET /query?name=<name>&commit=<commit>`。
-2. 每 10 秒重试；找到文件后 `GET /download?filename=<name>` 存到 `LOG_OUT_DIR/raw/<name>/<filename>.zip`，然后解压到 `LOG_OUT_DIR/extracted/<name>/<commit_id>/`。
+2. 每 `--interval` 秒重试；找到文件后 `GET /download?filename=<name>` 存到 `<out>/raw/<name>/<filename>.zip`，然后解压到 `<out>/extracted/<name>/<commit_id>/`。
 3. 同一 `(name, commit, datetime)` 不会重复下载（维护 `state.json`）。
-4. 找到**全部** watches 的文件后优雅退出（返回码 0）；超时（默认 30 分钟，可调 `LOG_TIMEOUT_SEC`）则返回码 2。
+4. 找到**全部** watches 的文件后优雅退出（返回码 0）；超时（默认 30 分钟，可调 `--timeout`）则返回码 2。
 5. 退出前打印一份**产物清单**（每个仓库有哪些文件、解压到哪）。
 
 **启动方式**：
 
 ```bash
 # 推荐：前台跑，bash 工具 timeout 调到 35 分钟（2100000ms）以上
-# url / out_dir 也可写在 config.yaml，CLI 仍优先
 python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py \
   --watch bgw=<bgw_short> --watch mc=<mc_short> \
   --out <config.paths.out_dir 或 ./_cicd_logs> \
-  --base-url <config.log_service.url 或 http://your-log-service:8080>
-```
-
-或显式环境变量：
-
-```bash
-LOG_WATCHES="bgw=<bgw_short>,mc=<mc_short>" \
-LOG_OUT_DIR=./_cicd_logs \
-LOG_BASE_URL=http://81.70.210.89:8080 \
-python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py
+  --base-url <config.log_service.url 或 http://your-log-service:8080> \
+  --interval 10 --timeout 1800
 ```
 
 ### 阶段 4：AI 解读日志，决定是否修复
@@ -181,7 +171,9 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py
 
 依赖 PyYAML（`pip install pyyaml`）。
 
-**优先级（高 → 低）**：CLI 参数 > 环境变量 > `config.yaml` > 脚本内置默认。
+**优先级（高 → 低）**：CLI 参数 > `config.yaml` > 脚本内置默认。
+
+> **没有环境变量入口**——watch / url / interval / timeout / out 全走命令行参数。`watches` 不写在配置里，每次调用 `--watch` 传入。
 
 ### 配置项
 
@@ -191,7 +183,6 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py
 | `log_service.poll_interval_sec` | int | 轮询间隔（秒） | `10` |
 | `log_service.timeout_sec` | int | 总超时（秒），超时返回码 2 | `1800` |
 | `paths.out_dir` | string | 产物输出根目录 | `./_cicd_logs` |
-| `paths.watches` | list[{name, commit}] | 默认 watch 列表，**留空时必须用 `--watch` 或 `LOG_WATCHES`** | `[]` |
 | `repos[].name` | string | 仓缩写（流水线 zip 首段 == 此值，--watch 的 name 也是此值） | 必填 |
 | `repos[].display_name` | string | 人类可读的全名（仅文档展示用） | `""` |
 | `repos[].path` | string | 本地仓库绝对路径 | `""` |
@@ -202,9 +193,8 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py
 
 - **增删仓 = 增删 `repos` 列表里的一项**，**不需要改 SKILL.md 或脚本**。
 - 仓缩写在脚本里**没有白名单**，`--watch foo=xxx` 也能跑（前提是服务端有 `foo_*.zip`）。
-- 环境变量（`LOG_BASE_URL` / `LOG_POLL_INTERVAL` / `LOG_TIMEOUT_SEC` / `LOG_OUT_DIR` / `LOG_WATCHES`）仍可临时覆盖。
-- CLI 参数仍优先级最高（`--config` / `--base-url` / `--out` / `--interval` / `--timeout` / `--watch`）。
-- `paths.watches` 与 `--watch` 同时存在时，**CLI 优先**。
+- `watches` 不走配置，必须用 CLI `--watch name=commit`（可重复传多个）。
+- 其它项（url / out_dir / interval / timeout）走配置；CLI 对应参数（`--base-url` / `--out` / `--interval` / `--timeout`）可临时覆盖。
 
 ### 模板（`config.yaml`）
 
@@ -217,15 +207,10 @@ log_service:
   timeout_sec: 1800
 
 paths:
-  out_dir: "./_cicd_logs"
-  watches: []            # 留空时必须用 --watch 显式指定
-  # 模板示例：
-  # watches:
-  #   - {name: bgw, commit: a586ff5e}
-  #   - {name: mc,  commit: ad6caad8}
+  out_dir: "./_cicd_logs"          # 产物输出根目录
 
 docs:
-  work_dir: "/path/to/project"   # 几个仓库的共同父目录（仅文档锚点）
+  work_dir: "/path/to/project"     # 几个仓库的共同父目录（仅文档锚点）
 
 repos:
   - name: bgw

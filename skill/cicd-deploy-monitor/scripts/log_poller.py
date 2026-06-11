@@ -7,21 +7,14 @@ CI/CD 日志轮询脚本
 按一定时间间隔轮询 log-service (http://81.70.210.89:8080)，
 针对每个 (仓库缩写, commit_id) 查找已上传的日志 zip 包，下载并解压。
 
-调用方式（两种）：
+调用方式（仅命令行参数）：
 
-  1) 命令行参数
-     python3 log_poller.py --watch bgw=abc1234 --watch mc=def5678 \
-         --out ./_cicd_logs --base-url http://81.70.220.89:8080
+  python3 log_poller.py --watch bgw=abc1234 --watch mc=def5678 \
+      --out ./_cicd_logs --base-url http://your-log-service:8080 \
+      --interval 10 --timeout 1800
 
-  2) 环境变量
-     LOG_BASE_URL=http://81.70.220.89:8080
-     LOG_OUT_DIR=./_cicd_logs
-     LOG_POLL_INTERVAL=10
-     LOG_TIMEOUT_SEC=1800
-     LOG_WATCHES="bgw=abc1234,mc=def5678"
-
-  --watch 形式： name=commit  （name 必须是 bgw/gids/mc，commit 是完整或前缀）
-  --watch 也可写 name=  （只传 name，留空用于全量查询；不推荐混用）
+  --watch 形式： name=commit  （name 是流水线 zip 首段，commit 是完整或前缀）
+  --watch 必须至少传一个；可重复。
 
 退出码：
   0  全部 watch 的文件都已下载并解压完成
@@ -33,7 +26,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import os
 import re
 import sys
 import time
@@ -109,9 +101,9 @@ def load_config(path: Optional[Path]) -> dict:
 
     期望结构：
       log_service: {url, poll_interval_sec, timeout_sec}
-      paths:       {out_dir, watches: [{name, commit}, ...]}
+      paths:       {out_dir}                          # 不再含 watches
       repos:       [{name, path, remote?, display_name?}, ...]
-      docs:        {work_dir}    # 仅文档锚点，脚本不读
+      docs:        {work_dir}                         # 仅文档锚点，脚本不读
     """
     if path is None or not Path(path).exists():
         return {}
@@ -134,7 +126,6 @@ def load_config(path: Optional[Path]) -> dict:
         },
         "paths": {
             "out_dir": str(paths.get("out_dir") or "./_cicd_logs"),
-            "watches": paths.get("watches") or [],
         },
         "repos": raw.get("repos") or [],
         "docs": raw.get("docs") or {},
@@ -160,16 +151,6 @@ def parse_watch(spec: str) -> Tuple[str, str]:
     if not name or not commit:
         raise ValueError(f"--watch 名称或 commit 为空：{spec!r}")
     return name, commit
-
-
-def parse_watches_from_env(env_value: str) -> List[Tuple[str, str]]:
-    out: List[Tuple[str, str]] = []
-    for item in env_value.split(","):
-        item = item.strip()
-        if not item:
-            continue
-        out.append(parse_watch(item))
-    return out
 
 
 def health_check(session: requests.Session, base_url: str) -> bool:
@@ -247,32 +228,16 @@ def build_state(args: argparse.Namespace, cfg: dict) -> State:
     if args.watch:
         watches_list = [parse_watch(w) for w in args.watch]
     else:
-        env = os.environ.get("LOG_WATCHES", "").strip()
-        cfg_watches: List[Tuple[str, str]] = []
-        for w in paths.get("watches") or []:
-            if isinstance(w, dict):
-                cfg_watches.append((str(w["name"]), str(w["commit"])))
-            elif isinstance(w, str) and "=" in w:
-                cfg_watches.append(parse_watch(w))
-        merged = env or cfg_watches
-        if not merged:
-            raise SystemExit(
-                "未指定 watch：传 --watch name=commit，或设环境变量 LOG_WATCHES，"
-                "或在 config.yaml 的 paths.watches 列表里写"
-            )
-        if isinstance(merged, str):
-            watches_list = parse_watches_from_env(merged)
-        else:
-            watches_list = merged
+        raise SystemExit(
+            "未指定 watch：必须传 --watch name=commit（可重复）"
+        )
 
     base_url = (
         args.base_url
-        or os.environ.get("LOG_BASE_URL")
         or log_svc.get("url", DEFAULT_BASE_URL)
     )
     out_dir = Path(
         args.out_dir
-        or os.environ.get("LOG_OUT_DIR")
         or paths.get("out_dir", "./_cicd_logs")
     ).resolve()
 
@@ -373,12 +338,10 @@ def run(args: argparse.Namespace) -> int:
 
     interval = int(
         args.interval
-        or os.environ.get("LOG_POLL_INTERVAL")
         or log_svc.get("poll_interval_sec", DEFAULT_POLL_INTERVAL)
     )
     timeout = int(
         args.timeout
-        or os.environ.get("LOG_TIMEOUT_SEC")
         or log_svc.get("timeout_sec", DEFAULT_TIMEOUT_SEC)
     )
 
