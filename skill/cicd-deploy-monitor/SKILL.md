@@ -98,14 +98,14 @@ submitted = [
 
 **关键参数**（全部走 CLI 参数；url / out_dir / interval / timeout 也可在 `config.yaml` 里给默认值）：
 
-- `--watch name=commit` 必填，可重复传；`commit` 是阶段 2 拿到的**短 hash**（如 `a586ff5e`），不是完整 SHA。
+- `--watch name` 必填，可重复传；脚本会根据 `config.yaml` 中 `repos[].path` 自动解析该仓库当前 HEAD 的短 hash（8位）。
 - `--base-url` 默认 `config.yaml` 的 `log_service.url`，再默认 `http://81.70.210.89:8080`
 - `--out` 默认 `config.yaml` 的 `paths.out_dir`，再默认 `./_cicd_logs`
 - `--interval` / `--timeout` 默认值来自 `config.yaml`，再默认 `10` 秒 / `1800` 秒
 
 **轮询逻辑**（脚本已实现，下面是契约）：
 
-1. 启动时对 `submitted` 里每个 `(name, commit)` 调用 `GET /query?name=<name>&commit=<commit>`。
+1. 启动时对 `submitted` 里每个 `(name, commit)` 调用 `GET /query?name=<name>&commit=<commit>`（`commit` 由脚本根据 `repos[].path` 自动解析）。
 2. 每 `--interval` 秒重试；找到文件后 `GET /download?filename=<name>` 存到 `<out>/raw/<name>/<filename>.zip`，然后解压到 `<out>/extracted/<name>/<commit_id>/`。
 3. 同一 `(name, commit, datetime)` 不会重复下载（维护 `state.json`）。
 4. 找到**全部** watches 的文件后优雅退出（返回码 0）；超时（默认 30 分钟，可调 `--timeout`）则返回码 2。
@@ -116,7 +116,7 @@ submitted = [
 ```bash
 # 推荐：前台跑，bash 工具 timeout 调到 35 分钟（2100000ms）以上
 python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py \
-  --watch bgw=<bgw_short> --watch mc=<mc_short> \
+  --watch bgw --watch mc \
   --out <config.paths.out_dir 或 ./_cicd_logs> \
   --base-url <config.log_service.url 或 http://your-log-service:8080> \
   --interval 10 --timeout 1800
@@ -171,7 +171,7 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py \
 
 **优先级（高 → 低）**：CLI 参数 > `config.yaml` > 脚本内置默认。
 
-阶段 3 启动日志轮询时，`--watch name=commit` 必须通过 CLI 传入（可重复多次）；其它参数（url / out_dir / interval / timeout）走 `config.yaml`，CLI 对应参数可临时覆盖。
+阶段 3 启动日志轮询时，`--watch name` 必须通过 CLI 传入（可重复多次）；其它参数（url / out_dir / interval / timeout）走 `config.yaml`，CLI 对应参数可临时覆盖。
 
 ### 配置项
 
@@ -190,7 +190,7 @@ python3 .opencode/skill/cicd-deploy-monitor/scripts/log_poller.py \
 ### 行为
 
 - **增删仓 = 增删 `repos` 列表里的一项**。
-- 仓缩写由服务端产物决定：`--watch <name>=<commit>` 中的 `<name>` 必须与某条 `repos[].name` 一致（即流水线 zip 文件名首段）。
+- 仓缩写由服务端产物决定：`--watch <name>` 中的 `<name>` 必须与某条 `repos[].name` 一致（即流水线 zip 文件名首段）。
 - `--watch` 每次调用都必须从 CLI 传入，配置里不存放待轮询条目。
 - 其它项（url / out_dir / interval / timeout）走 `config.yaml`；CLI 对应参数（`--base-url` / `--out` / `--interval` / `--timeout`）可临时覆盖。
 

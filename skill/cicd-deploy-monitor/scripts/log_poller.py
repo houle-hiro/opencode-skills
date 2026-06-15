@@ -5,16 +5,16 @@ CI/CD 日志轮询脚本
 ==================
 
 按一定时间间隔轮询 log-service (http://81.70.210.89:8080)，
-针对每个 (仓库缩写, commit_id) 查找已上传的日志 zip 包，下载并解压。
+针对每个仓库查找已上传的日志 zip 包，下载并解压。
 
 调用方式（仅命令行参数）：
 
-  python3 log_poller.py --watch bgw=abc1234 --watch mc=def5678 \
+  python3 log_poller.py --watch bgw --watch mc \
       --out ./_cicd_logs --base-url http://your-log-service:8080 \
       --interval 10 --timeout 1800
 
-  --watch 形式： name=commit  （name 是流水线 zip 首段，commit 是完整或前缀）
-  --watch 必须至少传一个；可重复。
+  --watch 传仓库名（与 config.yaml 的 repos[].name 对齐），可重复。
+  仓库 commit 由脚本从 repos[].path 通过 git rev-parse --short=8 HEAD 解析。
 
 退出码：
   0  全部 watch 的文件都已下载并解压完成
@@ -27,6 +27,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 import zipfile
@@ -141,16 +142,54 @@ def log(msg: str) -> None:
     print(f"[poller {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
-def parse_watch(spec: str) -> Tuple[str, str]:
-    """解析 name=commit 字符串。"""
-    if "=" not in spec:
-        raise ValueError(f"--watch 格式错误：{spec!r}，应为 name=commit")
-    name, commit = spec.split("=", 1)
-    name = name.strip()
-    commit = commit.strip()
-    if not name or not commit:
-        raise ValueError(f"--watch 名称或 commit 为空：{spec!r}")
-    return name, commit
+def parse_watch(spec: str) -> str:
+    """解析 --watch 形参，返回仓库名。"""
+    name = spec.strip()
+    if not name:
+        raise ValueError(f"--watch 名称为空：{spec!r}")
+    return name
+
+
+def resolve_commit_from_repo(repo_path: str) -> str:
+    """从本地 git 仓拉取仓库当前 HEAD 的 8 位短 hash。"""
+    if not repo_path:
+        raise RuntimeError("repos[].path 未配置，无法解析 commit")
+    p = Path(repo_path)
+    if not (p / ".git").exists() and not p.exists():
+        raise RuntimeError(f"repos[].path 不存在：{repo_path}")
+    try:
+        out = subprocess.check_output(
+            ["git", "-C", str(p), "rev-parse", "--short=8", "HEAD"],
+            stderr=subprocess.STDOUT,
+            timeout=10,
+        )
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"git rev-parse --short=8 HEAD 在 {repo_path} 失败：{e.output.decode(errors='replace').strip()}"
+        ) from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"git rev-parse 在 {repo_path} 超时") from e
+    return out.decode().strip()
+
+
+def resolve_watch_commits(
+    names: List[str],
+    repos_cfg: List[dict],
+) -> List[Tuple[str, str]]:
+    """为每个仓库名解析出 (name, commit)：从 repos[].path 跑 git rev-parse。"""
+    path_by_name = {
+        (r.get("name") or "").strip(): (r.get("path") or "").strip()
+        for r in repos_cfg
+        if isinstance(r, dict) and r.get("name")
+    }
+    resolved: List[Tuple[str, str]] = []
+    for name in names:
+        repo_path = path_by_name.get(name, "")
+        log(f"  · watch {name} 从 {repo_path or '<未配置>'} 解析 commit")
+        commit = resolve_commit_from_repo(repo_path)
+        log(f"  · watch {name} 解析到 commit = {commit}")
+        resolved.append((name, commit))
+    return resolved
 
 
 def health_check(session: requests.Session, base_url: str) -> bool:
@@ -226,11 +265,14 @@ def build_state(args: argparse.Namespace, cfg: dict) -> State:
     paths = cfg.get("paths", {}) if isinstance(cfg, dict) else {}
 
     if args.watch:
-        watches_list = [parse_watch(w) for w in args.watch]
+        names = [parse_watch(w) for w in args.watch]
     else:
         raise SystemExit(
-            "未指定 watch：必须传 --watch name=commit（可重复）"
+            "未指定 watch：必须传 --watch name（可重复）"
         )
+
+    repos_cfg = cfg.get("repos", []) if isinstance(cfg, dict) else []
+    watches_list = resolve_watch_commits(names, repos_cfg)
 
     base_url = (
         args.base_url
@@ -421,7 +463,10 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     p.add_argument(
         "--watch", action="append", default=[],
-        help="name=commit 形式的 watch，可重复传；name 仅限 bgw/gids/mc",
+        help=(
+            "需要轮询的仓库名（可重复），与 config.yaml 的 repos[].name 对齐。"
+            " commit 由脚本根据 repos[].path 解析。"
+        ),
     )
     p.add_argument(
         "--config", default=None,
